@@ -13,3 +13,7 @@ windows环境，release部分下载exe文件直接运行即可。
 手动解决方案：
 
 备份一个完结存档，创建新游戏，将新游戏存档中的global.json和global.bat.json替换掉完结存档文件夹中的这两个文件，就可以正常回溯了。
+
+
+## 截图示例
+![UI](https://7s-1304005994.cos.ap-singapore.myqcloud.com/42c50be9-74c8-4c54-ad51-36d704714f67.png)
