@@ -1,5 +1,5 @@
 # main
-# Cherry_C9H13N created on 2025/4/7
+# created on 2025/4/7
 import tkinter as tk
 from tkinter import ttk, Canvas
 from tkinter import filedialog
