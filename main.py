@@ -1,10 +1,10 @@
 # main
 # Cherry_C9H13N created on 2025/4/7
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, Canvas
 from tkinter import filedialog
 from datetime import datetime, timedelta, timezone
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 import os
 import json
 import time
@@ -13,8 +13,10 @@ import shutil
 import win32gui
 import win32ui
 import win32con
+import win32api
 import sys
-
+import ctypes
+from ctypes import wintypes
 
 DEFAULT_PATH = os.path.join(os.environ["USERPROFILE"], "AppData", "LocalLow", "DoubleCross", "SultansGame", "SAVEDATA")
 CONFIG_FILE = os.path.join(DEFAULT_PATH, "config.json")
@@ -30,13 +32,24 @@ else:
     current_dir = os.path.dirname(os.path.abspath(__file__))
 
 
+def is_failure_save(folder_path):
+    files = os.listdir(folder_path)
+
+    has_auto_save = "auto_save.json" in files
+    has_round_end = any(re.match(r"round_\d+_end\.json", f) for f in files)
+
+    return not has_auto_save and not has_round_end
+
+
 def get_folder_info(folder_path):
     folder_name = os.path.basename(folder_path)
     item = {
         "name": folder_name,
         "description": "无描述。",
         "timestamp": int(os.path.getmtime(folder_path)),
-        "path": os.path.abspath(folder_path)
+        "path": os.path.abspath(folder_path),
+        "failure": False,
+        "ingame": None
     }
 
     # 查找最大 round 文件
@@ -49,6 +62,23 @@ def get_folder_info(folder_path):
         for f in round_files
     ]
     item["turn"] = max(turns) + 1 if turns else 1
+
+    # 读取 global.json
+    global_path = os.path.join(folder_path, "global.json")
+    if os.path.exists(global_path):
+        try:
+            with open(global_path, 'r', encoding='utf-8') as f:
+                global_data = json.load(f)
+            if isinstance(global_data, dict) and "inGame" in global_data:
+                item["ingame"] = bool(global_data["inGame"])
+        except Exception as e:
+            print(f"读取 {global_path} 失败：{e}")
+            item["failure"] = True
+    else:
+        item["failure"] = True
+
+    if is_failure_save(folder_path):
+        item["failure"] = True
 
     # 图片路径
     preview_path = os.path.join(folder_path, "preview.jpg")
@@ -103,7 +133,33 @@ def load_or_create_config():
             item = old_items_map[folder_name]
             item["timestamp"] = int(os.path.getmtime(folder_path))
             item["path"] = os.path.abspath(folder_path)
-            # 可选择是否更新 turn/image
+            item["failure"] = False
+            item["ingame"] = None
+            # 查找最大 round 文件
+            round_files = [
+                f for f in os.listdir(folder_path)
+                if re.match(r"round_(\d+)_end\.json", f)
+            ]
+            turns = [
+                int(re.search(r"round_(\d+)_end\.json", f).group(1))
+                for f in round_files
+            ]
+            item["turn"] = max(turns) + 1 if turns else 1
+            # 读取 global.json
+            global_path = os.path.join(folder_path, "global.json")
+            if os.path.exists(global_path):
+                try:
+                    with open(global_path, 'r', encoding='utf-8') as f:
+                        global_data = json.load(f)
+                    if isinstance(global_data, dict) and "inGame" in global_data:
+                        item["ingame"] = bool(global_data["inGame"])
+                except Exception as e:
+                    print(f"读取 {global_path} 失败：{e}")
+                    item["failure"] = True
+            else:
+                item["failure"] = True
+            if is_failure_save(folder_path):
+                item["failure"] = True
         else:
             item = get_folder_info(folder_path)
 
@@ -160,6 +216,22 @@ def new_folder_name():
     return f"存档{max_n + 1}"
 
 
+def get_window_scaling(hwnd):
+    try:
+        user32 = ctypes.windll.user32
+        get_dpi_for_window = user32.GetDpiForWindow
+        get_dpi_for_window.restype = ctypes.c_uint
+        get_dpi_for_window.argtypes = [wintypes.HWND]
+        dpi = get_dpi_for_window(hwnd)
+        return dpi / 96.0
+    except AttributeError:
+        # 兼容旧系统
+        dc = ctypes.windll.user32.GetDC(0)
+        dpi = ctypes.windll.gdi32.GetDeviceCaps(dc, 88)  # LOGPIXELSX
+        ctypes.windll.user32.ReleaseDC(0, dc)
+        return dpi / 96.0
+
+
 def screenshot_window(window_title_keyword):
     def enum_windows_callback(hwnd, results):
         if win32gui.IsWindowVisible(hwnd):
@@ -187,22 +259,18 @@ def screenshot_window(window_title_keyword):
     win32gui.SetForegroundWindow(hwnd)
     time.sleep(0.2)
 
+    # 获取 DPI 缩放
+    scale = get_window_scaling(hwnd)
+
     # 获取窗口客户区大小（排除边框和标题栏）
     client_rect = win32gui.GetClientRect(hwnd)
-    client_width = client_rect[2] - client_rect[0]
-    client_height = client_rect[3] - client_rect[1]
+    width = int((client_rect[2] - client_rect[0]) * scale)
+    height = int((client_rect[3] - client_rect[1]) * scale)
 
     # 获取客户区在屏幕上的位置（相对于桌面左上角）
-    point = win32gui.ClientToScreen(hwnd, (0, 0))
-    client_left, client_top = point
-
     left, top = win32gui.ClientToScreen(hwnd, (0, 0))
-    right = left + client_width
-    bottom = top + client_height
-
-    # 获取窗口位置
-    # left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-    width, height = right - left, bottom - top
+    left = int(left * scale)
+    top = int(top * scale)
 
     # 获取桌面截图（可包含游戏画面）
     hdesktop = win32gui.GetDesktopWindow()
@@ -454,28 +522,73 @@ class ItemListApp:
         item_frame.pack_propagate(False)
         item_frame.pack(fill="x", pady=5, padx=5)
 
-        # item_frame.bind("<Button-1>", lambda e, i=idx: self.select_item(i))
-
         top_frame = tk.Frame(item_frame, background="white")
         top_frame.pack(fill="x")
 
-        max_width = 128  # 最大宽度
-        max_height = 72  # 最大高度
+        def create_image_widget(parent):
+            max_width = 128  # 最大宽度
+            max_height = 84  # 最大高度
 
-        try:
-            img = Image.open(item["image"]) if item["image"] else Image.new("RGB", (max_width, max_height))  # 防止没有图片时出错
-        except:
-            img = Image.new("RGB", (max_width, max_height))
+            # 加载图片
+            try:
+                image = Image.open(item["image"]) if item["image"] else Image.new("RGB", (max_width, max_height))
+            except:
+                image = Image.new("RGB", (max_width, max_height))
 
-        # 按比例缩放图片
-        img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            # 按比例缩放图片
+            image.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            # 转换为 Tkinter 可用的 PhotoImage
+            photo = ImageTk.PhotoImage(image)
+            # 创建 canvas 承载图片
+            canvas = Canvas(parent, background="white", width=max_width, height=max_height, highlightthickness=0)
+            canvas.create_image(max_width // 2, max_height // 2, anchor='center', image=photo)
+            canvas.image = photo  # 保持引用，防止被回收
 
-        # 转换为 Tkinter 可用的 PhotoImage
-        img_tk = ImageTk.PhotoImage(img)
+            def create_rotated_text_image(text, angle, font_size=18):
+                # 创建空白图像
+                font = ImageFont.truetype("msyhbd.ttc", font_size)
+                font.font_variant = 'bold'
+                text_size = font.getbbox(text)
+                img_size = (text_size[2] + 10, text_size[3] + 10)
+                img = Image.new("RGBA", img_size, (255, 0, 0, 0))  # 透明背景
+                draw = ImageDraw.Draw(img)
+                draw.text((5, 5), text, font=font, fill="white")
+                # 旋转
+                rotated = img.rotate(angle, expand=True)
+                return ImageTk.PhotoImage(rotated)
 
-        self.images.append(img_tk)  # 保存引用，避免被垃圾回收
-        img_label = tk.Label(top_frame, image=img_tk, background="white", width=max_width, height=max_height)
-        img_label.pack(side="left", padx=5, pady=5)
+            if item["failure"]:
+                # 在右下角绘制红色直角三角形
+                size = 54
+                canvas.create_polygon(
+                    max_width, max_height,  # 右下角
+                    max_width - size, max_height,  # 左一点
+                    max_width, max_height - size,  # 上一点
+                    fill="#dd3322", outline=""
+                )
+                # 创建旋转文字图片
+                rotated_text = create_rotated_text_image("损坏", angle=45)
+                canvas.create_image(max_width - size // 2 + 6, max_height - size // 2 + 6, image=rotated_text)
+                canvas.rotated_text = rotated_text  # 保持引用
+
+            elif item["ingame"] is False:
+                # 在右下角绘制蓝色直角三角形
+                size = 54
+                canvas.create_polygon(
+                    max_width, max_height,  # 右下角
+                    max_width - size, max_height,  # 左一点
+                    max_width, max_height - size,  # 上一点
+                    fill="#2299dd", outline=""
+                )
+                # 创建旋转文字图片
+                rotated_text = create_rotated_text_image("完结", angle=45)
+                canvas.create_image(max_width - size // 2 + 6, max_height - size // 2 + 6, image=rotated_text)
+                canvas.rotated_text = rotated_text  # 保持引用
+
+            return canvas
+
+        image_canvas = create_image_widget(top_frame)
+        image_canvas.pack(side="left", padx=5, pady=5)
 
         text_frame = tk.Frame(top_frame, background="white", width=200, height=72)
         text_frame.pack_propagate(False)
@@ -489,27 +602,28 @@ class ItemListApp:
         tk.Label(text_frame, text=f"{item.get('description', '')}", background="white", anchor="w").pack(fill="x")
         tk.Label(text_frame, text=f"当前回合：{item.get('turn', 0)}", background="white", anchor="w").pack(fill="x")
 
-        text_frame.bind("<Double-Button-1>", lambda e, i=idx: self.open_edit_dialog(i))
-        for widget in text_frame.winfo_children():
-            widget.bind("<Double-Button-1>", lambda e, i=idx: self.open_edit_dialog(i))
-
         btn_frame = tk.Frame(top_frame, background="white")
         btn_frame.pack(side="right", padx=5)
 
-        ttk.Button(btn_frame, text="载入", width=6, command=lambda i=idx: self.load_save(i)).pack(pady=2)
-        ttk.Button(btn_frame, text="回溯", width=6, command=lambda i=idx: self.rollback_item(i)).pack(pady=2)
-        ttk.Button(btn_frame, text="删除", width=6, command=lambda i=idx: self.confirm_delete(i)).pack(pady=2)
+        load_btn = ttk.Button(btn_frame, text="载入", width=6, command=lambda i=idx: self.load_save(i))
+        rollback_btn = ttk.Button(btn_frame, text="回溯", width=6, command=lambda i=idx: self.rollback_item(i))
+        delete_btn = ttk.Button(btn_frame, text="删除", width=6, command=lambda i=idx: self.confirm_delete(i))
 
-        def bind_click_recursive(swidget, callback):
-            swidget.bind("<Button-1>", callback)
+        load_btn.pack(pady=2)
+        rollback_btn.pack(pady=2)
+        delete_btn.pack(pady=2)
+
+        if item["failure"]:
+            load_btn.state(["disabled"])
+            rollback_btn.state(["disabled"])
+
+        def bind_click_recursive(swidget, switch, callback):
+            swidget.bind(switch, callback)
             for child in swidget.winfo_children():
-                bind_click_recursive(child, callback)
+                bind_click_recursive(child, switch, callback)
 
-        bind_click_recursive(item_frame, lambda e, i=idx: self.select_item(i))
-
-        # top_frame.bind("<Button-1>", lambda e, i=idx: self.select_item(i))
-        # text_frame.bind("<Button-1>", lambda e, i=idx: self.select_item(i))
-        # btn_frame.bind("<Button-1>", lambda e, i=idx: self.select_item(i))
+        bind_click_recursive(item_frame, "<Button-1>", lambda e, i=idx: self.select_item(i))
+        bind_click_recursive(item_frame, "<Double-Button-1>", lambda e, i=idx: self.open_edit_dialog(i))
 
         self.item_widgets.append(item_frame)
 
@@ -554,11 +668,14 @@ class ItemListApp:
             }
 
             save_path = os.path.join(MORE_SAVE_PATH, new_folder_name())
+            current_path = os.path.join(CURRENT_SAVE_PATH, CURRENT_ID)
 
             # 复制整个
-            shutil.copytree(os.path.join(CURRENT_SAVE_PATH, CURRENT_ID), save_path)
+            shutil.copytree(current_path, save_path)
             item["path"] = save_path
 
+            item["failure"] = False
+            item["ingame"] = None
             # 查找最大 round 文件
             round_files = [
                 f for f in os.listdir(save_path)
@@ -570,6 +687,23 @@ class ItemListApp:
             ]
             item["turn"] = max(turns) + 1 if turns else 1
 
+            # 读取 global.json
+            global_path = os.path.join(save_path, "global.json")
+            if os.path.exists(global_path):
+                try:
+                    with open(global_path, 'r', encoding='utf-8') as f:
+                        global_data = json.load(f)
+                    if isinstance(global_data, dict) and "inGame" in global_data:
+                        item["ingame"] = bool(global_data["inGame"])
+                except Exception as e:
+                    print(f"读取 {global_path} 失败：{e}")
+                    item["failure"] = True
+            else:
+                item["failure"] = True
+
+            if is_failure_save(save_path):
+                item["failure"] = True
+
             save_img = screenshot_window(GAME_WINDOW_NAME)
             item["image"] = save_img if save_img else ""
 
@@ -578,10 +712,23 @@ class ItemListApp:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(items, f, ensure_ascii=False, indent=2)
 
-            if os.path.exists(os.path.join(CURRENT_SAVE_PATH, CURRENT_ID)):
-                shutil.rmtree(os.path.join(CURRENT_SAVE_PATH, CURRENT_ID))
+            if os.path.exists(current_path):
+                shutil.rmtree(current_path)
 
-            shutil.copytree(items[idx]["path"], os.path.join(CURRENT_SAVE_PATH, CURRENT_ID))
+            shutil.copytree(items[idx]["path"], current_path)
+            auto_save_path = os.path.join(current_path, "auto_save.json")
+            if items[idx]["ingame"] and not os.path.exists(auto_save_path):
+                # 查找最大 round 文件
+                round_files = [
+                    f for f in os.listdir(current_path)
+                    if re.match(r"round_(\d+)_end\.json", f)
+                ]
+                turns = [
+                    int(re.search(r"round_(\d+)_end\.json", f).group(1))
+                    for f in round_files
+                ]
+
+                os.rename(os.path.join(current_path, f"round_{max(turns)}_end.json"), auto_save_path)
 
             self.refresh_item_list()
             win.destroy()
@@ -594,10 +741,24 @@ class ItemListApp:
             win.destroy()
 
         def cover_load():
-            if os.path.exists(os.path.join(CURRENT_SAVE_PATH, CURRENT_ID)):
-                shutil.rmtree(os.path.join(CURRENT_SAVE_PATH, CURRENT_ID))
+            current_path = os.path.join(CURRENT_SAVE_PATH, CURRENT_ID)
+            if os.path.exists(current_path):
+                shutil.rmtree(current_path)
 
-            shutil.copytree(items[idx]["path"], os.path.join(CURRENT_SAVE_PATH, CURRENT_ID))
+            shutil.copytree(items[idx]["path"], current_path)
+            auto_save_path = os.path.join(current_path, "auto_save.json")
+            if items[idx]["ingame"] and not os.path.exists(auto_save_path):
+                # 查找最大 round 文件
+                round_files = [
+                    f for f in os.listdir(current_path)
+                    if re.match(r"round_(\d+)_end\.json", f)
+                ]
+                turns = [
+                    int(re.search(r"round_(\d+)_end\.json", f).group(1))
+                    for f in round_files
+                ]
+
+                os.rename(os.path.join(current_path, f"round_{max(turns)}_end.json"), auto_save_path)
 
             self.refresh_item_list()
             win.destroy()
@@ -657,11 +818,6 @@ class ItemListApp:
                 shutil.rmtree(items[idx]["path"])
             else:
                 print("存档不在指定目录中，拒绝删除")
-            # if os.path.commonpath([items[idx]["image"], os.path.join(DEFAULT_PATH, 'ScreenShot')]) == os.path.join(DEFAULT_PATH, 'ScreenShot'):
-            #     if os.path.isfile(items[idx]["image"]):
-            #         os.remove(items[idx]["image"])
-            # else:
-            #     print("截图不在指定目录中，拒绝删除")
         except Exception as e:
             print(f'删除失败：{e}')
 
@@ -734,6 +890,8 @@ class ItemListApp:
             shutil.copytree(os.path.join(CURRENT_SAVE_PATH, CURRENT_ID), save_path)
             item["path"] = save_path
 
+            item["failure"] = False
+            item["ingame"] = None
             # 查找最大 round 文件
             round_files = [
                 f for f in os.listdir(save_path)
@@ -744,6 +902,23 @@ class ItemListApp:
                 for f in round_files
             ]
             item["turn"] = max(turns) + 1 if turns else 1
+
+            # 读取 global.json
+            global_path = os.path.join(save_path, "global.json")
+            if os.path.exists(global_path):
+                try:
+                    with open(global_path, 'r', encoding='utf-8') as f:
+                        global_data = json.load(f)
+                    if isinstance(global_data, dict) and "inGame" in global_data:
+                        item["ingame"] = bool(global_data["inGame"])
+                except Exception as e:
+                    print(f"读取 {global_path} 失败：{e}")
+                    item["failure"] = True
+            else:
+                item["failure"] = True
+
+            if is_failure_save(save_path):
+                item["failure"] = True
 
             save_img = screenshot_window(GAME_WINDOW_NAME)
             item["image"] = save_img if save_img else ""
@@ -815,16 +990,16 @@ class ItemListApp:
                 status_label.config(text="不能回溯到当前回合或更高", fg="red")
                 confirm_btn.state(["disabled"])
                 return False
+            elif not os.path.exists(os.path.join(item["path"], f"round_{val_int}_end.json")):
+                status_label.config(text=f"存档不完整，未能找到{val_int}回合的记录", fg="red")
+                confirm_btn.state(["disabled"])
+                return False
             status_label.config(text="回溯将会创建新的存档，不会覆盖现有存档", fg="green")
             confirm_btn.state(["!disabled"])
             return True
 
         def rollback_confirm():
             if validate_input():
-                # 匹配 “存档数字” 的正则
-                pattern_1 = re.compile(r"^存档(\d+)$")
-                max_n = 0
-
                 new_item = {
                     "name": new_folder_name(),
                     "description": f"由【{item['name']}】回溯至第{int(input_var.get())}回合的存档。",
@@ -836,6 +1011,27 @@ class ItemListApp:
                 # 复制整个
                 shutil.copytree(item["path"], save_path)
                 new_item["path"] = save_path
+
+                # 读取 global.json
+                new_item["failure"] = False
+                new_item["ingame"] = None
+                global_path = os.path.join(save_path, "global.json")
+                if os.path.exists(global_path):
+                    try:
+                        with open(global_path, 'r', encoding='utf-8') as f:
+                            global_data = json.load(f)
+                        with open(global_path, 'w', encoding='utf-8') as f:
+                            global_data["inGame"] = True
+                            json.dump(global_data, f, ensure_ascii=False, separators=(',', ':'))
+                            new_item["ingame"] = True
+                    except Exception as e:
+                        print(f"读取 {global_path} 失败：{e}")
+                        new_item["failure"] = True
+                else:
+                    new_item["failure"] = True
+
+                if is_failure_save(save_path):
+                    new_item["failure"] = True
 
                 new_item["turn"] = int(input_var.get())
 
@@ -858,13 +1054,13 @@ class ItemListApp:
                             print(f"已重命名：{filename} → auto_save.json")
                         elif n > int(input_var.get()):
                             os.remove(file_path)
-                            print(f"已删除：{filename}")
+                            # print(f"已删除：{filename}")
                     if match_2:
                         n = int(match_2.group(1))
                         file_path = os.path.join(save_path, filename)
                         if n > int(input_var.get()):
                             os.remove(file_path)
-                            print(f"已删除：{filename}")
+                            # print(f"已删除：{filename}")
 
                 new_item["image"] = item["image"]
 
@@ -879,9 +1075,6 @@ class ItemListApp:
         def rollback_cancel():
             self.refresh_item_list()
             win.destroy()
-
-        # ttk.Button(win, text="确认", command=confirm).pack(side="left", expand=True, padx=20, pady=10)
-        # ttk.Button(win, text="取消", command=cancel).pack(side="right", expand=True, padx=20, pady=10)
 
         confirm_btn.config(command=rollback_confirm)
         confirm_btn.state(["disabled"])
